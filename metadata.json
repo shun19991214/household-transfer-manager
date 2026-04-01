@@ -1,0 +1,5 @@
+{
+  "name": "Household Transfer Manager",
+  "description": "A household finance manager to calculate monthly transfer amounts based on fixed and variable costs.",
+  "requestFramePermissions": []
+}
