@@ -1,33 +1,35 @@
-# Cloud Build pipeline: build with VITE_* env vars baked in, push to Artifact Registry,
-# deploy to Cloud Run.
+# Cloud Build pipeline matching the Cloud Run "Continuously deploy" trigger conventions.
 #
-# Required substitution variables (set in the Cloud Build trigger UI):
-#   _VITE_SUPABASE_URL       - Supabase project URL
-#   _VITE_SUPABASE_ANON_KEY  - Supabase anon key
-#
-# Optional (have sensible defaults):
-#   _SERVICE_NAME  - Cloud Run service name
-#   _REGION        - GCP region
-#   _REPO          - Artifact Registry repository name (must exist beforehand)
+# Substitution variables expected from the trigger UI:
+#   _AR_HOSTNAME       - Artifact Registry hostname (e.g. asia-northeast1-docker.pkg.dev)
+#   _AR_PROJECT_ID     - GCP project that owns the Artifact Registry repo
+#   _AR_REPOSITORY     - Artifact Registry repository name (e.g. cloud-run-source-deploy)
+#   _DEPLOY_REGION     - Cloud Run region (e.g. asia-northeast1)
+#   _SERVICE_NAME      - Cloud Run service name
+#   _VITE_SUPABASE_URL       - Supabase project URL (must be added to the trigger UI)
+#   _VITE_SUPABASE_ANON_KEY  - Supabase anon key  (must be added to the trigger UI)
 
 substitutions:
+  _AR_HOSTNAME: ''
+  _AR_PROJECT_ID: ''
+  _AR_REPOSITORY: ''
+  _DEPLOY_REGION: ''
   _SERVICE_NAME: household-transfer-manager
-  _REGION: asia-northeast1
-  _REPO: household-transfer-manager
   _VITE_SUPABASE_URL: ''
   _VITE_SUPABASE_ANON_KEY: ''
 
 options:
   logging: CLOUD_LOGGING_ONLY
+  substitution_option: ALLOW_LOOSE
 
 steps:
-  # 1. Build container image with VITE_* build args
+  # 1. Build container image with VITE_* baked in at build time
   - name: gcr.io/cloud-builders/docker
     id: build
     args:
       - build
-      - --tag=$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_SERVICE_NAME:$SHORT_SHA
-      - --tag=$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_SERVICE_NAME:latest
+      - --tag=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$_SERVICE_NAME:$SHORT_SHA
+      - --tag=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$_SERVICE_NAME:latest
       - --build-arg=VITE_SUPABASE_URL=$_VITE_SUPABASE_URL
       - --build-arg=VITE_SUPABASE_ANON_KEY=$_VITE_SUPABASE_ANON_KEY
       - .
@@ -38,9 +40,9 @@ steps:
     args:
       - push
       - --all-tags
-      - $_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_SERVICE_NAME
+      - $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$_SERVICE_NAME
 
-  # 3. Deploy new revision to Cloud Run
+  # 3. Deploy revision to Cloud Run
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     id: deploy
     entrypoint: gcloud
@@ -48,11 +50,11 @@ steps:
       - run
       - deploy
       - $_SERVICE_NAME
-      - --image=$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_SERVICE_NAME:$SHORT_SHA
-      - --region=$_REGION
+      - --image=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$_SERVICE_NAME:$SHORT_SHA
+      - --region=$_DEPLOY_REGION
       - --platform=managed
       - --allow-unauthenticated
 
 images:
-  - $_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_SERVICE_NAME:$SHORT_SHA
-  - $_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_SERVICE_NAME:latest
+  - $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$_SERVICE_NAME:$SHORT_SHA
+  - $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$_SERVICE_NAME:latest
