@@ -1,0 +1,26 @@
+server {
+    listen ${PORT};
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Hashed asset bundles produced by Vite are immutable
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # SPA: any unknown path falls back to index.html (HashRouter is also fine)
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Lightweight health/readiness endpoint
+    location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+        add_header Content-Type text/plain;
+    }
+}
