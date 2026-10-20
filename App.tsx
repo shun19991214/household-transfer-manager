@@ -8,6 +8,7 @@ import MonthlyInput from './components/MonthlyInput';
 import SummaryDashboard from './components/SummaryDashboard';
 import ExpenseCharts from './components/ExpenseCharts';
 import AssetManager from './components/AssetManager';
+import { SignInScreen, NoHouseholdScreen, CloudErrorScreen } from './components/AuthScreens';
 
 // @ts-ignore - JSX file for class component compatibility
 import ErrorBoundary from './components/ErrorBoundary.jsx';
@@ -104,9 +105,12 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 };
 
 const AppContent: React.FC = () => {
-  const { isLoaded } = useFinance();
+  const { isLoaded, cloudStatus } = useFinance();
 
-  if (!isLoaded) return <LoadingScreen />;
+  if (!isLoaded || cloudStatus === 'initializing' || cloudStatus === 'loading') return <LoadingScreen />;
+  if (cloudStatus === 'signed-out') return <SignInScreen />;
+  if (cloudStatus === 'no-household') return <NoHouseholdScreen />;
+  if (cloudStatus === 'error') return <CloudErrorScreen />;
 
   return (
     <Layout>

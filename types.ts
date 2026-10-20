@@ -92,6 +92,16 @@ export interface TransferRecord {
   note?: string;
 }
 
+// disabled: Firebase not configured (local-only mode)
+// no-household: signed in but not a member of any household document
+export type CloudStatus = 'disabled' | 'initializing' | 'signed-out' | 'loading' | 'no-household' | 'ready' | 'error';
+
+export interface CloudUser {
+  uid: string;
+  email: string | null;
+  displayName: string | null;
+}
+
 export interface FinanceContextType {
   fixedCosts: CostItem[];
   monthlyData: MonthlyData[];
@@ -106,6 +116,11 @@ export interface FinanceContextType {
   scholarshipReserveBonusMonths: number[];
   setScholarshipReserveBonusMonths: (months: number[]) => void;
   isCloudEnabled: boolean;
+  cloudStatus: CloudStatus;
+  cloudUser: CloudUser | null;
+  cloudMessage: string | null;
+  signIn: () => Promise<void>;
+  signOut: () => Promise<void>;
   syncStatus: 'idle' | 'saving' | 'saved' | 'error';
   isLoaded: boolean;
   selectedMonth: string;
