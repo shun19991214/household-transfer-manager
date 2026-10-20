@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, Trash2, Layers, Cloud, AlertCircle, Building2, Edit3, Check, X } from 'lucide-react';
+import { Plus, Trash2, Layers, Cloud, AlertCircle, Building2, Edit3, Check, X, LogOut } from 'lucide-react';
 import { useFinance } from '../contexts/FinanceContext';
 import { formatCurrency } from '../utils/format';
 import { Button, Card, Input, PageHeader, IconButton, useToast } from './UIComponents';
@@ -14,6 +14,10 @@ const FixedCostSettings: React.FC = () => {
     deleteFixedCost,
     updateFixedCost,
     isCloudEnabled,
+    cloudStatus,
+    cloudUser,
+    cloudMessage,
+    signOut,
     bankAccounts,
     addBankAccount,
     updateBankAccount,
@@ -68,17 +72,37 @@ const FixedCostSettings: React.FC = () => {
           </div>
         </header>
 
-        {!isCloudEnabled && (
+        {cloudStatus === 'disabled' && (
           <Card className="mb-6" color="amber">
             <div className="flex gap-3">
               <AlertCircle className="w-5 h-5 text-amber-500 flex-shrink-0" />
               <div>
                 <h3 className="text-sm font-medium text-amber-800">クラウド設定が未完了です</h3>
                 <p className="text-xs text-amber-700 mt-1">
-                  プロジェクトルートの <code className="bg-amber-100 px-1 rounded">supabaseConfig.ts</code> にSupabaseの設定情報を記述すると、データのクラウド保存・同期が有効になります。
+                  <code className="bg-amber-100 px-1 rounded">VITE_FIREBASE_*</code> 環境変数（<code className="bg-amber-100 px-1 rounded">.env.example</code> 参照）を設定してビルドすると、Firestore へのクラウド保存・同期が有効になります。
                 </p>
               </div>
             </div>
+          </Card>
+        )}
+
+        {isCloudEnabled && (
+          <Card className="mb-6">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-slate-500 break-all">
+                ログイン中: {cloudUser?.email ?? cloudUser?.uid}
+              </p>
+              <Button variant="secondary" size="sm" onClick={() => { signOut().catch((e) => console.error('Sign-out failed', e)); }}>
+                <LogOut className="w-4 h-4 mr-1" />
+                ログアウト
+              </Button>
+            </div>
+            {cloudMessage && (
+              <p className="text-xs text-amber-700 mt-3 flex gap-1">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                {cloudMessage}
+              </p>
+            )}
           </Card>
         )}
       </section>

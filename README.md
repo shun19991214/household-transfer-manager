@@ -15,6 +15,13 @@ View your app in AI Studio: https://ai.studio/apps/drive/1VTYaQ_o5YoiCiTjnyP_HYT
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. Copy [.env.example](.env.example) to `.env.local` and fill in the `VITE_FIREBASE_*` values
+   (leave them empty to run in local-only mode backed by localStorage)
 3. Run the app:
    `npm run dev`
+
+## Deploy (Cloud Run + Firestore)
+
+- Data is stored in Firestore `households/{householdId}` and protected by [firestore.rules](firestore.rules) (Google sign-in, member UIDs only)
+- [cloudbuild.yaml](cloudbuild.yaml) builds the nginx image with `VITE_FIREBASE_*` baked in and deploys it to Cloud Run
+- Setup, Supabase data migration and rollback: [docs/firestore-migration.md](docs/firestore-migration.md)

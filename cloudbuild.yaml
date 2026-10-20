@@ -6,8 +6,11 @@
 #   _AR_REPOSITORY     - Artifact Registry repository name (e.g. cloud-run-source-deploy)
 #   _DEPLOY_REGION     - Cloud Run region (e.g. asia-northeast1)
 #   _SERVICE_NAME      - Cloud Run service name
-#   _VITE_SUPABASE_URL       - Supabase project URL (must be added to the trigger UI)
-#   _VITE_SUPABASE_ANON_KEY  - Supabase anon key  (must be added to the trigger UI)
+#   _VITE_FIREBASE_API_KEY      - Firebase web app apiKey      (must be added to the trigger UI)
+#   _VITE_FIREBASE_AUTH_DOMAIN  - Firebase authDomain, e.g. <project>.firebaseapp.com
+#   _VITE_FIREBASE_PROJECT_ID   - Firebase / GCP project ID hosting Firestore
+#   _VITE_FIREBASE_APP_ID       - Firebase web app appId
+#   _VITE_FIREBASE_DATABASE_ID  - Optional named Firestore database (empty = "(default)")
 
 substitutions:
   _AR_HOSTNAME: ''
@@ -15,14 +18,28 @@ substitutions:
   _AR_REPOSITORY: ''
   _DEPLOY_REGION: ''
   _SERVICE_NAME: household-transfer-manager
-  _VITE_SUPABASE_URL: ''
-  _VITE_SUPABASE_ANON_KEY: ''
+  _VITE_FIREBASE_API_KEY: ''
+  _VITE_FIREBASE_AUTH_DOMAIN: ''
+  _VITE_FIREBASE_PROJECT_ID: ''
+  _VITE_FIREBASE_APP_ID: ''
+  _VITE_FIREBASE_DATABASE_ID: ''
 
 options:
   logging: CLOUD_LOGGING_ONLY
   substitution_option: ALLOW_LOOSE
 
 steps:
+  # 0. Fail fast if Firebase config was not provided (otherwise the app silently runs local-only)
+  - name: gcr.io/cloud-builders/docker
+    id: check-config
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        for v in "$_VITE_FIREBASE_API_KEY" "$_VITE_FIREBASE_AUTH_DOMAIN" "$_VITE_FIREBASE_PROJECT_ID" "$_VITE_FIREBASE_APP_ID"; do
+          if [ -z "$$v" ]; then echo "Missing _VITE_FIREBASE_* substitution" >&2; exit 1; fi
+        done
+
   # 1. Build container image with VITE_* baked in at build time
   - name: gcr.io/cloud-builders/docker
     id: build
@@ -30,8 +47,11 @@ steps:
       - build
       - --tag=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$_SERVICE_NAME:$SHORT_SHA
       - --tag=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$_SERVICE_NAME:latest
-      - --build-arg=VITE_SUPABASE_URL=$_VITE_SUPABASE_URL
-      - --build-arg=VITE_SUPABASE_ANON_KEY=$_VITE_SUPABASE_ANON_KEY
+      - --build-arg=VITE_FIREBASE_API_KEY=$_VITE_FIREBASE_API_KEY
+      - --build-arg=VITE_FIREBASE_AUTH_DOMAIN=$_VITE_FIREBASE_AUTH_DOMAIN
+      - --build-arg=VITE_FIREBASE_PROJECT_ID=$_VITE_FIREBASE_PROJECT_ID
+      - --build-arg=VITE_FIREBASE_APP_ID=$_VITE_FIREBASE_APP_ID
+      - --build-arg=VITE_FIREBASE_DATABASE_ID=$_VITE_FIREBASE_DATABASE_ID
       - .
 
   # 2. Push both tags to Artifact Registry

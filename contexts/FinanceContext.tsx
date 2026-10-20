@@ -1,8 +1,15 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { CostItem, MonthlyData, ScholarshipLoan, SavingsGoal, TransferRecord, BankAccount, FinanceContextType, ExpenseCategory, DEFAULT_BONUS_MONTHS } from '../types';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { onAuthStateChanged, signInWithPopup, signOut as firebaseSignOut } from 'firebase/auth';
+import {
+  collection, doc, getDocFromServer, getDocs, limit, onSnapshot, query, serverTimestamp, updateDoc, where,
+} from 'firebase/firestore';
+import { CostItem, MonthlyData, ScholarshipLoan, SavingsGoal, TransferRecord, BankAccount, FinanceContextType, ExpenseCategory, DEFAULT_BONUS_MONTHS, CloudStatus, CloudUser } from '../types';
 import { generateId } from '../utils/format';
-import { supabaseConfig } from '../supabaseConfig';
+import { getFirebase, HOUSEHOLDS_COLLECTION } from '../utils/firebase';
+import {
+  FinancePayload, mergeRemotePayload, sanitizeBonusMonths, stableStringify, byteLength,
+  PAYLOAD_HARD_LIMIT_BYTES, PAYLOAD_WARN_BYTES,
+} from '../utils/financePayload';
 
 const FinanceContext = createContext<FinanceContextType | undefined>(undefined);
 
@@ -16,7 +23,12 @@ const STORAGE_KEY_RESERVE_INITIAL = 'finance_app_scholarship_reserve_initial';
 const STORAGE_KEY_RESERVE_BONUS = 'finance_app_scholarship_reserve_bonus';
 const STORAGE_KEY_RESERVE_BONUS_MONTHS = 'finance_app_scholarship_reserve_bonus_months';
 
-const DOC_ID = 'main';
+const describeError = (error: unknown): string => {
+  const code = (error as { code?: string })?.code;
+  if (code === 'permission-denied') return 'アクセス権限がありません。世帯メンバーに登録されているか確認してください。';
+  if (code === 'unavailable') return 'クラウドに接続できません。ネットワークを確認してください。';
+  return error instanceof Error ? error.message : String(error);
+};
 
 export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [fixedCosts, setFixedCosts] = useState<CostItem[]>([]);
@@ -28,9 +40,11 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [scholarshipReserveInitial, setScholarshipReserveInitialState] = useState<number>(0);
   const [scholarshipReserveBonus, setScholarshipReserveBonusState] = useState<number>(0);
   const [scholarshipReserveBonusMonths, setScholarshipReserveBonusMonthsState] = useState<number[]>(DEFAULT_BONUS_MONTHS);
-  const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
-  const [isCloudSynced, setIsCloudSynced] = useState(false);
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus>(() => (getFirebase() ? 'initializing' : 'disabled'));
+  const [cloudUser, setCloudUser] = useState<CloudUser | null>(null);
+  const [cloudMessage, setCloudMessage] = useState<string | null>(null);
+  const [householdId, setHouseholdId] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const defaultMonth = new Date().toISOString().slice(0, 7);
   const [selectedMonth, setSelectedMonthRaw] = useState(defaultMonth);
@@ -42,7 +56,7 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, []);
 
-  // Load from LocalStorage on mount and initialize Supabase
+  // Load from LocalStorage on mount
   useEffect(() => {
     try {
       const storedFixed = localStorage.getItem(STORAGE_KEY_FIXED);
@@ -65,12 +79,7 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (storedReserveBonus) setScholarshipReserveBonusState(Number(JSON.parse(storedReserveBonus)) || 0);
       if (storedReserveBonusMonths) {
         const arr = JSON.parse(storedReserveBonusMonths);
-        if (Array.isArray(arr)) setScholarshipReserveBonusMonthsState(arr.filter((m: any) => Number.isInteger(m) && m >= 1 && m <= 12));
-      }
-
-      if (supabaseConfig.url && supabaseConfig.anonKey) {
-        const client = createClient(supabaseConfig.url, supabaseConfig.anonKey);
-        setSupabase(client);
+        if (Array.isArray(arr)) setScholarshipReserveBonusMonthsState(sanitizeBonusMonths(arr));
       }
     } catch (error) {
       console.error("Failed to load data from storage", error);
@@ -90,76 +99,186 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
   useEffect(() => { if (isLoaded) localStorage.setItem(STORAGE_KEY_RESERVE_BONUS, JSON.stringify(scholarshipReserveBonus)); }, [scholarshipReserveBonus, isLoaded]);
   useEffect(() => { if (isLoaded) localStorage.setItem(STORAGE_KEY_RESERVE_BONUS_MONTHS, JSON.stringify(scholarshipReserveBonusMonths)); }, [scholarshipReserveBonusMonths, isLoaded]);
 
-  // Cloud sync
-  const syncFromCloud = useCallback(async () => {
-    if (!supabase) throw new Error("クラウド未接続です。supabaseConfig.ts を設定してください。");
-    try {
-      const { data, error } = await supabase
-        .from('finance_data')
-        .select('data')
-        .eq('id', DOC_ID)
-        .single();
+  // ============ Cloud sync (Firestore: households/{householdId}.data) ============
 
-      if (error && error.code !== 'PGRST116') throw error;
+  const payload = useMemo<FinancePayload>(() => ({
+    fixedCosts, monthlyData, scholarshipLoans, savingsGoals, transferRecords, bankAccounts,
+    scholarshipReserveInitial, scholarshipReserveBonus, scholarshipReserveBonusMonths,
+  }), [fixedCosts, monthlyData, scholarshipLoans, savingsGoals, transferRecords, bankAccounts, scholarshipReserveInitial, scholarshipReserveBonus, scholarshipReserveBonusMonths]);
+  const payloadKey = useMemo(() => stableStringify(payload), [payload]);
 
-      if (data?.data) {
-        const d = data.data;
-        if (d.fixedCosts) setFixedCosts(d.fixedCosts);
-        if (d.monthlyData) setMonthlyData(d.monthlyData);
-        if (d.scholarshipLoans) setScholarshipLoans(d.scholarshipLoans);
-        if (d.savingsGoals) setSavingsGoals(d.savingsGoals);
-        if (d.transferRecords) setTransferRecords(d.transferRecords);
-        if (d.bankAccounts) setBankAccounts(d.bankAccounts);
-        if (typeof d.scholarshipReserveInitial === 'number') {
-          setScholarshipReserveInitialState(d.scholarshipReserveInitial);
-        }
-        if (typeof d.scholarshipReserveBonus === 'number') {
-          setScholarshipReserveBonusState(d.scholarshipReserveBonus);
-        }
-        if (Array.isArray(d.scholarshipReserveBonusMonths)) {
-          setScholarshipReserveBonusMonthsState(
-            d.scholarshipReserveBonusMonths.filter((m: any) => Number.isInteger(m) && m >= 1 && m <= 12)
-          );
-        }
+  // Latest local state, readable from snapshot callbacks without re-subscribing
+  const payloadRef = useRef(payload);
+  const payloadKeyRef = useRef(payloadKey);
+  payloadRef.current = payload;
+  payloadKeyRef.current = payloadKey;
+  // Serialized payload last confirmed equal to the cloud copy; local state differing from it means unsaved edits
+  const lastSyncedKeyRef = useRef<string | null>(null);
+
+  const applyPayload = useCallback((p: FinancePayload) => {
+    setFixedCosts(p.fixedCosts);
+    setMonthlyData(p.monthlyData);
+    setScholarshipLoans(p.scholarshipLoans);
+    setSavingsGoals(p.savingsGoals);
+    setTransferRecords(p.transferRecords);
+    setBankAccounts(p.bankAccounts);
+    setScholarshipReserveInitialState(p.scholarshipReserveInitial);
+    setScholarshipReserveBonusState(p.scholarshipReserveBonus);
+    setScholarshipReserveBonusMonthsState(p.scholarshipReserveBonusMonths);
+  }, []);
+
+  const applyRemote = useCallback((remote: unknown) => {
+    const merged = mergeRemotePayload(payloadRef.current, remote);
+    lastSyncedKeyRef.current = stableStringify(merged);
+    applyPayload(merged);
+  }, [applyPayload]);
+
+  // Resolve the signed-in user's household
+  useEffect(() => {
+    const fb = getFirebase();
+    if (!fb) return;
+    let cancelled = false;
+
+    const unsubscribe = onAuthStateChanged(fb.auth, async (user) => {
+      lastSyncedKeyRef.current = null;
+      setHouseholdId(null);
+      setSyncStatus('idle');
+      setCloudMessage(null);
+      if (!user) {
+        setCloudUser(null);
+        setCloudStatus('signed-out');
+        return;
       }
-    } catch (error) {
-      console.error("Error fetching from Supabase", error);
-      throw error;
-    }
-  }, [supabase]);
-
-  // Auto-fetch on Supabase connection
-  useEffect(() => {
-    if (!supabase) return;
-    const fetchInitialData = async () => {
-      try { await syncFromCloud(); } catch (error) { console.error("Initial cloud sync failed:", error); } finally { setIsCloudSynced(true); }
-    };
-    fetchInitialData();
-  }, [supabase, syncFromCloud]);
-
-  // Auto-save to Supabase (debounced)
-  useEffect(() => {
-    if (!supabase || !isLoaded || !isCloudSynced) return;
-    setSyncStatus('saving');
-    const saveData = async () => {
+      setCloudUser({ uid: user.uid, email: user.email, displayName: user.displayName });
+      setCloudStatus('loading');
       try {
-        const { error } = await supabase
-          .from('finance_data')
-          .upsert({
-            id: DOC_ID,
-            data: { fixedCosts, monthlyData, scholarshipLoans, savingsGoals, transferRecords, bankAccounts, scholarshipReserveInitial, scholarshipReserveBonus, scholarshipReserveBonusMonths },
-            updated_at: new Date().toISOString()
-          });
-        if (error) throw error;
+        // Must match the rules' membership condition for list queries to be allowed
+        const snap = await getDocs(query(
+          collection(fb.db, HOUSEHOLDS_COLLECTION),
+          where('members', 'array-contains', user.uid),
+          limit(2),
+        ));
+        if (cancelled || fb.auth.currentUser?.uid !== user.uid) return;
+        if (snap.empty) {
+          setCloudStatus('no-household');
+          return;
+        }
+        if (snap.size > 1) console.warn('User belongs to multiple households; using the first one');
+        const ids = snap.docs.map((d) => d.id).sort();
+        setHouseholdId(ids[0]);
+      } catch (error) {
+        if (cancelled) return;
+        console.error('Failed to resolve household', error);
+        setCloudMessage(describeError(error));
+        setCloudStatus('error');
+      }
+    });
+
+    return () => { cancelled = true; unsubscribe(); };
+  }, []);
+
+  // Live subscription to the household document
+  useEffect(() => {
+    const fb = getFirebase();
+    if (!fb || !householdId) return;
+    const ref = doc(fb.db, HOUSEHOLDS_COLLECTION, householdId);
+
+    const unsubscribe = onSnapshot(ref, (snap) => {
+      // Our own pending write echoing back; nothing new
+      if (snap.metadata.hasPendingWrites) return;
+      if (!snap.exists()) {
+        setCloudStatus('no-household');
+        return;
+      }
+      const remote = snap.data().data;
+      const isFirstLoad = lastSyncedKeyRef.current === null;
+      const hasUnsavedLocalEdits = !isFirstLoad && payloadKeyRef.current !== lastSyncedKeyRef.current;
+      if (hasUnsavedLocalEdits) {
+        // Local edits are about to be saved and will overwrite the remote change (last write wins)
+        console.warn('Remote update ignored because local edits are pending');
+        return;
+      }
+      applyRemote(remote);
+      setSyncStatus('saved');
+      if (isFirstLoad) setCloudStatus('ready');
+    }, (error) => {
+      console.error('Household subscription failed', error);
+      setCloudMessage(describeError(error));
+      setSyncStatus('error');
+      setCloudStatus('error');
+    });
+
+    return unsubscribe;
+  }, [householdId, applyRemote]);
+
+  // Auto-save to Firestore (debounced)
+  useEffect(() => {
+    const fb = getFirebase();
+    if (!fb || !householdId || !isLoaded || cloudStatus !== 'ready') return;
+    if (payloadKey === lastSyncedKeyRef.current) return;
+
+    const size = byteLength(payloadKey);
+    if (size > PAYLOAD_HARD_LIMIT_BYTES) {
+      setCloudMessage(`データサイズ (${Math.round(size / 1024)} KB) が Firestore の上限を超えるため保存できません。古いデータの整理が必要です。`);
+      setSyncStatus('error');
+      return;
+    }
+    setCloudMessage(size > PAYLOAD_WARN_BYTES
+      ? `データサイズが ${Math.round(size / 1024)} KB で、保存上限 (約 1 MB) に近づいています。`
+      : null);
+
+    setSyncStatus('saving');
+    const keyToSave = payloadKey;
+    const dataToSave = payload;
+    const timeoutId = setTimeout(async () => {
+      try {
+        await updateDoc(doc(fb.db, HOUSEHOLDS_COLLECTION, householdId), {
+          data: dataToSave,
+          updatedAt: serverTimestamp(),
+          updatedBy: fb.auth.currentUser?.uid ?? null,
+        });
+        lastSyncedKeyRef.current = keyToSave;
         setSyncStatus('saved');
       } catch (error) {
-        console.error("Error writing to Supabase", error);
+        console.error('Error writing to Firestore', error);
+        setCloudMessage(describeError(error));
         setSyncStatus('error');
       }
-    };
-    const timeoutId = setTimeout(saveData, 1000);
+    }, 1000);
     return () => clearTimeout(timeoutId);
-  }, [fixedCosts, monthlyData, scholarshipLoans, savingsGoals, transferRecords, bankAccounts, scholarshipReserveInitial, scholarshipReserveBonus, scholarshipReserveBonusMonths, supabase, isLoaded, isCloudSynced]);
+  }, [payload, payloadKey, householdId, isLoaded, cloudStatus]);
+
+  // Manual pull: overwrite local state with the server copy
+  const syncFromCloud = useCallback(async () => {
+    const fb = getFirebase();
+    if (!fb) throw new Error("クラウド未設定です。VITE_FIREBASE_* 環境変数を設定してください。");
+    if (!householdId) throw new Error("世帯データに接続されていません。");
+    try {
+      const snap = await getDocFromServer(doc(fb.db, HOUSEHOLDS_COLLECTION, householdId));
+      if (snap.exists()) applyRemote(snap.data().data);
+    } catch (error) {
+      console.error("Error fetching from Firestore", error);
+      throw error;
+    }
+  }, [householdId, applyRemote]);
+
+  const signIn = useCallback(async () => {
+    const fb = getFirebase();
+    if (!fb) throw new Error("クラウド未設定です。");
+    try {
+      await signInWithPopup(fb.auth, fb.googleProvider);
+    } catch (error) {
+      const code = (error as { code?: string })?.code;
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') return;
+      throw error;
+    }
+  }, []);
+
+  const signOut = useCallback(async () => {
+    const fb = getFirebase();
+    if (!fb) return;
+    await firebaseSignOut(fb.auth);
+  }, []);
 
   const setScholarshipReserveInitial = useCallback((amount: number) => {
     setScholarshipReserveInitialState(Math.max(0, Math.round(amount) || 0));
@@ -276,7 +395,8 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     scholarshipReserveInitial, setScholarshipReserveInitial,
     scholarshipReserveBonus, setScholarshipReserveBonus,
     scholarshipReserveBonusMonths, setScholarshipReserveBonusMonths,
-    isCloudEnabled: !!supabase, syncStatus, isLoaded,
+    isCloudEnabled: cloudStatus === 'ready', cloudStatus, cloudUser, cloudMessage, signIn, signOut,
+    syncStatus, isLoaded,
     selectedMonth, setSelectedMonth,
     getMonthlyData,
     addFixedCost, updateFixedCost, deleteFixedCost,
@@ -292,7 +412,8 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     scholarshipReserveInitial, setScholarshipReserveInitial,
     scholarshipReserveBonus, setScholarshipReserveBonus,
     scholarshipReserveBonusMonths, setScholarshipReserveBonusMonths,
-    supabase, syncStatus, isLoaded, selectedMonth, setSelectedMonth,
+    cloudStatus, cloudUser, cloudMessage, signIn, signOut,
+    syncStatus, isLoaded, selectedMonth, setSelectedMonth,
     getMonthlyData,
     addFixedCost, updateFixedCost, deleteFixedCost,
     updateMonthlySalary, addVariableCost, updateVariableCost, deleteVariableCost,
